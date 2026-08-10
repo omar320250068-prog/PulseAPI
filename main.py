@@ -5,7 +5,10 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
+from sqlite_repository import SQLiteTaskRepository
+
 app = FastAPI(title="Task API", version="1.0")
+repo = SQLiteTaskRepository()
 
 class TaskIn(BaseModel):
     title: str
@@ -14,15 +17,10 @@ class TaskUpdate(BaseModel):
     title: Optional[str] = None
     done: Optional[bool] = None
 
-tasks = [
-    {"id": 1, "title": "Buy groceries", "done": False},
-    {"id": 2, "title": "Walk the dog", "done": False},
-    {"id": 3, "title": "Read a book", "done": False},
-]
 
-
-def next_id() -> int:
-    return max((task["id"] for task in tasks), default=0) + 1
+@app.on_event("startup")
+def startup_event() -> None:
+    repo.init_db()
 
 
 @app.exception_handler(RequestValidationError)
@@ -49,16 +47,16 @@ def health():
 
 @app.get("/tasks", summary="List tasks")
 def list_tasks():
-    """Return all tasks stored in memory."""
-    return tasks
+    """Return all tasks stored in SQLite."""
+    return repo.list_tasks()
 
 
 @app.get("/tasks/{task_id}", summary="Get task by ID")
 def get_task(task_id: int):
     """Return a single task by its ID."""
-    task = next((item for item in tasks if item["id"] == task_id), None)
-    if not task:
-        raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+    task = repo.get_task(task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="Task not found")
     return task
 
 
@@ -68,32 +66,27 @@ def create_task(payload: TaskIn):
     title = payload.title.strip()
     if not title:
         raise HTTPException(status_code=400, detail="Title must be a non-empty string")
-    task = {"id": next_id(), "title": title, "done": False}
-    tasks.append(task)
-    return task
+    return repo.create_task(title)
 
 
 @app.put("/tasks/{task_id}", summary="Update task")
 def update_task(task_id: int, payload: TaskUpdate):
     """Update a task's title and/or done status."""
-    task = next((item for item in tasks if item["id"] == task_id), None)
-    if not task:
-        raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+    title = None
     if payload.title is not None:
         title = payload.title.strip()
         if not title:
             raise HTTPException(status_code=400, detail="Title must be a non-empty string")
-        task["title"] = title
-    if payload.done is not None:
-        task["done"] = payload.done
-    return task
+
+    updated = repo.update_task(task_id, title, payload.done)
+    if updated is None:
+        raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+    return updated
 
 
 @app.delete("/tasks/{task_id}", status_code=204, summary="Delete task")
 def delete_task(task_id: int):
-    """Delete a task from memory."""
-    for index, task in enumerate(tasks):
-        if task["id"] == task_id:
-            tasks.pop(index)
-            return
-    raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+    """Delete a task from SQLite."""
+    deleted = repo.delete_task(task_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
