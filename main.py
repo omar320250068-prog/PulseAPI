@@ -5,10 +5,10 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from sqlite_repository import SQLiteTaskRepository
+from postgres_repository import PostgresTaskRepository
 
 app = FastAPI(title="Task API", version="1.0")
-repo = SQLiteTaskRepository()
+repo = PostgresTaskRepository()
 
 class TaskIn(BaseModel):
     title: str
