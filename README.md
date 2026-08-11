@@ -86,3 +86,55 @@ Screenshot of the database viewer:
 - Data now persists across server restarts.
 - All CRUD operations (GET, POST, PUT, DELETE) now execute real SQL queries (SELECT, INSERT, UPDATE, DELETE) instead of manipulating a list in memory.
 - The API's routes, request bodies, and response shapes were not changed — only the storage layer underneath.
+
+## PostgreSQL + Docker (Week 3 · Part 3)
+
+The project has been extended to run PostgreSQL in Docker, with the app and database started together via Docker Compose.
+
+### Architecture
+
+Following the Repository Pattern, the storage layer is fully abstracted behind a `TaskRepository` interface (repository.py). Two implementations exist:
+
+- `sqlite_repository.py` — the original SQLite implementation (kept in the codebase, no longer used by main.py)
+- `postgres_repository.py` — the current PostgreSQL implementation, used by main.py
+
+Switching from SQLite to PostgreSQL required changing only two lines in main.py (the import and the repository instantiation). No routes, request/response shapes, or status codes were changed — proving that storage is truly an implementation detail behind the repository interface.
+
+### Running the full stack
+
+1. Copy `.env.example` to `.env` and adjust values if needed.
+2. Run:
+
+   ```bash
+   docker compose up --build
+   ```
+
+3. Verify the API is responding:
+
+   ```bash
+   curl http://localhost:8000/tasks
+   ```
+
+4. Confirm data persists across container restarts:
+
+   ```bash
+   curl -X POST http://localhost:8000/tasks \
+     -H "Content-Type: application/json" \
+     -d '{"title": "Test full stack persistence"}'
+
+   docker compose down
+   docker compose up -d
+
+   curl http://localhost:8000/tasks
+   ```
+
+   Example output after restart:
+
+   ```json
+   [
+     {"id":1,"title":"Buy groceries","done":false},
+     {"id":2,"title":"Walk the dog","done":false},
+     {"id":3,"title":"Read a book","done":false},
+     {"id":4,"title":"Test full stack persistence","done":false}
+   ]
+   ```
