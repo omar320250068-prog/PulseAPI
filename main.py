@@ -26,7 +26,10 @@ class AuthCredentials(BaseModel):
 
 @app.on_event("startup")
 def startup_event() -> None:
-    repo.init_db()
+    try:
+        repo.init_db()
+    except Exception as exc:  # noqa: BLE001
+        print(f"WARNING: Task database unavailable: {exc}")
     ok, message = check_supabase_connection()
     print(message)
     if not ok:
