@@ -269,6 +269,86 @@ pages_ok: 3 | pages_failed: 0 | books_collected: 60 | price range: 12.84 - 57.31
 
 ---
 
+## Week 5 — Trusted LLM Judgement
+
+One workflow step, done by an AI model, with an answer the code can actually
+trust. The endpoint `POST /ai/parse-receipt` takes messy receipt text and the
+model extracts structured fields — **only** returned after they pass four gates:
+
+1. **Schema** — the answer must validate against the Pydantic `Receipt` model
+   (merchant, `YYYY-MM-DD` date, 3-letter currency, positive `total` with a
+   rounding guard, and a `line_items` list with positive amounts).
+2. **Timeout** — every model call has a hard `LLM_TIMEOUT` (default 20s); the
+   request cannot hang forever.
+3. **Retries that know when to stop** — network blips, `5xx`/`429`/`408`, a
+   reply that is not JSON, or one that fails schema validation all trigger a
+   re-ask with backoff — but only up to `LLM_MAX_RETRIES` (default 3). Auth
+   errors (e.g. `401`) fail fast: retrying a bad key is pointless.
+4. **Tests** — 9 offline tests prove every failure mode without any network or
+   API credit (see `test_llm_receipt.py`).
+
+### Files
+
+| File | What it does |
+| --- | --- |
+| `llm.py` | `LLMClient` (OpenAI-compatible HTTP client), `judge_text()`, `extract_json()` (handles markdown fences / prose), Pydantic schemas, error hierarchy (503 vs 502). |
+| `main.py` | adds `POST /ai/parse-receipt` |
+| `test_llm_receipt.py` | 9 offline tests using `httpx.MockTransport` |
+
+### Endpoint
+
+```
+POST /ai/parse-receipt
+{"text": "Corner Cafe - 12 High St\nFlat white 3.50\nToast 4.24\nTotal 9.74"}
+```
+
+```json
+{
+  "merchant": "Corner Cafe",
+  "date": "2026-09-20",
+  "currency": "GBP",
+  "total": 9.74,
+  "line_items": [
+    {"description": "Flat white", "amount": 3.5},
+    {"description": "Toast", "amount": 4.24}
+  ]
+}
+```
+
+### Status codes used
+
+| Code | Meaning |
+| --- | --- |
+| `200` | Valid judgement that passed the schema |
+| `400` | Empty/unusable request text |
+| `503` | No API key configured, provider unreachable, or quota/rate-limited after bounded retries |
+| `502` | Model kept answering, but never produced schema-valid JSON |
+
+### Providers
+
+Any OpenAI-compatible endpoint works — set `LLM_API_KEY`, `LLM_BASE_URL` and
+`LLM_MODEL` in `.env` (see `.env.example`). The default points at OpenAI; the
+free options (e.g. Groq) or a local Ollama server are just a URL swap. If
+`LLM_API_KEY` is empty the client falls back to the `OPENAI_API_KEY`
+environment variable. The key is never committed.
+
+### Run the tests
+
+```
+python test_llm_receipt.py
+```
+
+`9 LLM judgement tests passed` — including: valid parse, markdown-fenced reply,
+gibberish-then-valid (retries), schema-violation recovery, garbage exhaustion
+(stops after exactly 3 calls), timeout (bounded, no infinite retry), 401 fails
+fast (exactly 1 call), and endpoint behaviour (400/503 mapping).
+
+### Git history
+
+Staged as `Week 5: ...` commits and pushed (see `git log --oneline`).
+
+---
+
 *Everything below documents the earlier weeks. It is kept intact.*
 
 ---
