@@ -1,11 +1,12 @@
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from fastapi.security import HTTPAuthorizationCredentials
 from pydantic import BaseModel
 
-from auth import check_supabase_connection, supabase
+from auth import bearer_scheme, check_supabase_connection, supabase
 from postgres_repository import PostgresTaskRepository
 from supabase_auth.errors import AuthApiError
 
@@ -99,6 +100,33 @@ def login(payload: AuthCredentials):
         "access_token": session.access_token,
         "refresh_token": session.refresh_token,
         "user": session.user.model_dump(mode="json"),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Public + protected routes
+# ---------------------------------------------------------------------------
+
+@app.get("/public/info", summary="Public, unprotected info")
+def public_info():
+    """Read-only endpoint that requires no authentication."""
+    return {"message": "Welcome stranger! This info is public."}
+
+
+@app.get("/protected/profile", summary="Read private profile data")
+def profile(credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme)):
+    """Extract the Bearer token from the request header.
+
+    Stage 2: the token is extracted but not verified against Supabase yet.
+    A missing or malformed header is rejected with 401.
+    """
+    if credentials is None or not credentials.credentials:
+        raise HTTPException(status_code=401, detail="Access token required")
+    return {
+        "id": None,
+        "email": None,
+        "created_at": None,
+        "note": "Token received. Verification against Supabase arrives in Stage 3.",
     }
 
 
