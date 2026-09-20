@@ -115,18 +115,28 @@ def public_info():
 
 @app.get("/protected/profile", summary="Read private profile data")
 def profile(credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme)):
-    """Extract the Bearer token from the request header.
+    """Verify the Bearer token with Supabase and return the user's metadata.
 
-    Stage 2: the token is extracted but not verified against Supabase yet.
-    A missing or malformed header is rejected with 401.
+    Expired, tampered or invalid tokens are rejected with 401.
     """
     if credentials is None or not credentials.credentials:
         raise HTTPException(status_code=401, detail="Access token required")
+
+    token = str(credentials.credentials)
+    try:
+        response = supabase.auth.get_user(token)
+    except AuthApiError:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    except Exception:
+        raise HTTPException(status_code=503, detail="Authentication service unavailable")
+    if response is None or response.user is None:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+    user = response.user.model_dump(mode="json")
     return {
-        "id": None,
-        "email": None,
-        "created_at": None,
-        "note": "Token received. Verification against Supabase arrives in Stage 3.",
+        "id": user.get("id"),
+        "email": user.get("email"),
+        "created_at": user.get("created_at"),
     }
 
 
