@@ -5,8 +5,9 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from auth import check_supabase_connection
+from auth import check_supabase_connection, supabase
 from postgres_repository import PostgresTaskRepository
+from supabase_auth.errors import AuthApiError
 
 app = FastAPI(title="Task API", version="1.0")
 repo = PostgresTaskRepository()
@@ -17,6 +18,10 @@ class TaskIn(BaseModel):
 class TaskUpdate(BaseModel):
     title: Optional[str] = None
     done: Optional[bool] = None
+
+class AuthCredentials(BaseModel):
+    email: str
+    password: str
 
 
 @app.on_event("startup")
@@ -48,6 +53,53 @@ def root():
 def health():
     """Return a simple readiness status."""
     return {"status": "ok"}
+
+
+# ---------------------------------------------------------------------------
+# Auth: open routes
+# ---------------------------------------------------------------------------
+
+@app.post("/auth/signup", status_code=201, summary="Create a new user account")
+def signup(payload: AuthCredentials):
+    """Register a new user with Supabase. Returns the created user object."""
+    email = payload.email.strip()
+    password = payload.password
+    if not email or not password:
+        raise HTTPException(status_code=400, detail="Email and password are required")
+    try:
+        response = supabase.auth.sign_up({"email": email, "password": password})
+    except AuthApiError as exc:
+        raise HTTPException(status_code=400, detail=exc.message or "Sign up failed")
+    except Exception:
+        raise HTTPException(status_code=503, detail="Authentication service unavailable")
+    if response.user is None:
+        raise HTTPException(status_code=400, detail="Unable to create user")
+    return response.user.model_dump(mode="json")
+
+
+@app.post("/auth/login", summary="Authenticate a user and return JWTs")
+def login(payload: AuthCredentials):
+    """Log a user in via Supabase. Returns access token, refresh token and user."""
+    email = payload.email.strip()
+    password = payload.password
+    if not email or not password:
+        raise HTTPException(status_code=400, detail="Email and password are required")
+    try:
+        response = supabase.auth.sign_in_with_password(
+            {"email": email, "password": password}
+        )
+    except AuthApiError:
+        raise HTTPException(status_code=401, detail="Invalid login credentials")
+    except Exception:
+        raise HTTPException(status_code=503, detail="Authentication service unavailable")
+    if response.session is None:
+        raise HTTPException(status_code=401, detail="Invalid login credentials")
+    session = response.session
+    return {
+        "access_token": session.access_token,
+        "refresh_token": session.refresh_token,
+        "user": session.user.model_dump(mode="json"),
+    }
 
 
 @app.get("/tasks", summary="List tasks")
