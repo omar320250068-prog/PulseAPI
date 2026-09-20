@@ -6,6 +6,14 @@ from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
 
 from auth import check_supabase_connection, get_current_user, logout_user, supabase
+from llm import (
+    InvalidModelOutputError,
+    LLMClient,
+    LLMNotConfiguredError,
+    LLMUnavailableError,
+    Receipt,
+    ReceiptRequest,
+)
 from postgres_repository import PostgresTaskRepository
 from supabase_auth.errors import AuthApiError
 
@@ -60,6 +68,7 @@ def root():
             "/public/info",
             "/protected/profile",
             "/protected/dashboard",
+            "/ai/parse-receipt",
         ],
     }
 
@@ -154,6 +163,29 @@ def dashboard(current: dict = Depends(get_current_user)):
         "user_id": user.get("id"),
         "email": user.get("email"),
     }
+
+
+# ---------------------------------------------------------------------------
+# AI judgement: one workflow step, only trusted answers
+# ---------------------------------------------------------------------------
+
+@app.post("/ai/parse-receipt", summary="Extract structured fields from receipt text")
+def parse_receipt(payload: ReceiptRequest):
+    """Ask an LLM to pull structured fields out of messy receipt text.
+
+    The answer is returned only after it passes a Pydantic schema, a hard
+    timeout and bounded retries. Errors map to clear status codes.
+    """
+    client = LLMClient()
+    try:
+        receipt = client.judge_text(payload.text, Receipt)
+    except LLMNotConfiguredError:
+        raise HTTPException(status_code=503, detail="LLM_API_KEY is not configured")
+    except LLMUnavailableError:
+        raise HTTPException(status_code=503, detail="LLM service unavailable")
+    except InvalidModelOutputError:
+        raise HTTPException(status_code=502, detail="Model output could not be validated")
+    return receipt.model_dump()
 
 
 @app.get("/tasks", summary="List tasks")
