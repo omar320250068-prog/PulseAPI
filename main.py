@@ -5,6 +5,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
+from auth import check_supabase_connection
 from postgres_repository import PostgresTaskRepository
 
 app = FastAPI(title="Task API", version="1.0")
@@ -21,6 +22,10 @@ class TaskUpdate(BaseModel):
 @app.on_event("startup")
 def startup_event() -> None:
     repo.init_db()
+    ok, message = check_supabase_connection()
+    print(message)
+    if not ok:
+        print("WARNING: " + message)
 
 
 @app.exception_handler(RequestValidationError)
