@@ -195,6 +195,80 @@ curl -i http://localhost:8000/protected/profile \
 
 ---
 
+## Week 4 — Polite Book Scraper
+
+Every data pipeline starts with a question: where does the data come from?
+This week's answer is a small, polite scraper that turns **three pages of
+messy HTML into clean, checked JSON** — without ever being rude to the server.
+
+It collects **60 books** from the free practice site `books.toscrape.com`,
+turns text like `£51.77` into a real number, validates every record against a
+schema, and survives a broken page without crashing.
+
+### Politeness & hygiene rules
+
+- **Robots.txt first.** The scraper fetches and parses `robots.txt` and checks
+  every page URL against it before collecting. (`books.toscrape.com` ships no
+  robots.txt, so it is treated as *allowed by default* — and our own rate limit
+  still applies.)
+- **Say who you are.** Every request sends a real `User-Agent` identifying the
+  scraper.
+- **Go slowly.** One request at a time, with a configurable delay (default 1s)
+  between hits.
+- **Retry, don't hammer.** Transient failures retry with gentle backoff (max 3).
+- **Never trust data you didn't create.** Every record must pass the `Book`
+  Pydantic schema before it can be written to JSON.
+- **Broken pages don't crash the run.** A page that fails is recorded in the
+  report and skipped; the remaining pages still complete.
+
+### Files
+
+```
+scraper.py          # polite scraper: robots, retries, parsing, validation, JSON output
+test_scraper.py     # 9 offline tests (no network needed)
+books.json          # the 60 validated books (this run's clean output)
+scrape_report.json  # run metadata: pages, rows, failures, timing
+```
+
+### How to run
+
+```bash
+python scraper.py                     # scrapes 3 pages, polite 1s delay
+python scraper.py --pages 5 --delay 2 # your own settings
+python test_scraper.py                # run the offline tests
+```
+
+Output goes to `books.json` (the clean, checked JSON array) and
+`scrape_report.json` (run metadata). A previous run's output is already
+committed, so the repo shows a real, validated `books.json`.
+
+### What the output looks like
+
+```json
+{
+  "title": "A Light in the Attic",
+  "price": 51.77,
+  "currency": "GBP",
+  "availability": "In stock",
+  "availability_count": null,
+  "rating": 3,
+  "url": "https://books.toscrape.com/catalogue/a-light-in-the-attic_1000/index.html"
+}
+```
+
+Every `price` is a real `float` (no more `£51.77` strings), every `rating` an
+integer 1–5, and every record was validated against the `Book` schema before it
+was saved — 60/60 books, 0 schema violations in the committed run.
+
+### Reference run
+
+```
+Scraped 3/3 pages, 60 books collected in 5.14s.
+pages_ok: 3 | pages_failed: 0 | books_collected: 60 | price range: 12.84 - 57.31
+```
+
+---
+
 *Everything below documents the earlier weeks. It is kept intact.*
 
 ---

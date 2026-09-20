@@ -1,0 +1,44 @@
+{
+  "generated_at": "2026-09-20T16:17:16",
+  "base_url": "https://books.toscrape.com",
+  "user_agent": "week4-polite-scraper/1.0 (CS assignment; gracious rate; see https://github.com/omar320250068-prog/PulseAPI)",
+  "delay_seconds": 1.0,
+  "robots_checked": true,
+  "pages_requested": 3,
+  "pages_ok": 3,
+  "pages_failed": 0,
+  "books_collected": 60,
+  "elapsed_seconds": 5.14,
+  "pages": [
+    {
+      "page": 1,
+      "url": "https://books.toscrape.com/catalogue/page-1.html",
+      "status": "ok",
+      "rows": 20,
+      "validated": 20,
+      "skipped_rows": [],
+      "error": null,
+      "attempts": 1
+    },
+    {
+      "page": 2,
+      "url": "https://books.toscrape.com/catalogue/page-2.html",
+      "status": "ok",
+      "rows": 20,
+      "validated": 20,
+      "skipped_rows": [],
+      "error": null,
+      "attempts": 1
+    },
+    {
+      "page": 3,
+      "url": "https://books.toscrape.com/catalogue/page-3.html",
+      "status": "ok",
+      "rows": 20,
+      "validated": 20,
+      "skipped_rows": [],
+      "error": null,
+      "attempts": 1
+    }
+  ]
+}
