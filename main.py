@@ -2,15 +2,14 @@ from typing import Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
-from fastapi.security import HTTPAuthorizationCredentials
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
 
-from auth import bearer_scheme, check_supabase_connection, supabase
+from auth import check_supabase_connection, get_current_user, logout_user, supabase
 from postgres_repository import PostgresTaskRepository
 from supabase_auth.errors import AuthApiError
 
-app = FastAPI(title="Task API", version="1.0")
+app = FastAPI(title="Task & Auth API", version="2.0")
 repo = PostgresTaskRepository()
 
 class TaskIn(BaseModel):
@@ -47,7 +46,19 @@ async def http_error_handler(_: Request, exc: HTTPException):
 @app.get("/", summary="API metadata")
 def root():
     """Return API metadata and supported endpoints."""
-    return {"name": "Task API", "version": "1.0", "endpoints": ["/tasks"]}
+    return {
+        "name": "Task & Auth API",
+        "version": "2.0",
+        "endpoints": [
+            "/tasks",
+            "/auth/signup",
+            "/auth/login",
+            "/auth/logout",
+            "/public/info",
+            "/protected/profile",
+            "/protected/dashboard",
+        ],
+    }
 
 
 @app.get("/health", summary="Health check")
@@ -113,30 +124,32 @@ def public_info():
     return {"message": "Welcome stranger! This info is public."}
 
 
+@app.post("/auth/logout", status_code=204, summary="Log out the current user")
+def logout(current: dict = Depends(get_current_user)):
+    """Revoke the user's Supabase session (protected route)."""
+    logout_user(current["token"])
+    return Response(status_code=204)
+
+
 @app.get("/protected/profile", summary="Read private profile data")
-def profile(credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme)):
-    """Verify the Bearer token with Supabase and return the user's metadata.
-
-    Expired, tampered or invalid tokens are rejected with 401.
-    """
-    if credentials is None or not credentials.credentials:
-        raise HTTPException(status_code=401, detail="Access token required")
-
-    token = str(credentials.credentials)
-    try:
-        response = supabase.auth.get_user(token)
-    except AuthApiError:
-        raise HTTPException(status_code=401, detail="Invalid or expired token")
-    except Exception:
-        raise HTTPException(status_code=503, detail="Authentication service unavailable")
-    if response is None or response.user is None:
-        raise HTTPException(status_code=401, detail="Invalid or expired token")
-
-    user = response.user.model_dump(mode="json")
+def profile(current: dict = Depends(get_current_user)):
+    """Return the verified user's secure metadata."""
+    user = current["user"]
     return {
         "id": user.get("id"),
         "email": user.get("email"),
         "created_at": user.get("created_at"),
+    }
+
+
+@app.get("/protected/dashboard", summary="Second protected route")
+def dashboard(current: dict = Depends(get_current_user)):
+    """Prove the shared guard protects every route it is attached to."""
+    user = current["user"]
+    return {
+        "message": "Welcome to your dashboard",
+        "user_id": user.get("id"),
+        "email": user.get("email"),
     }
 
 
