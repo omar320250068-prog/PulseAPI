@@ -453,6 +453,34 @@ All offline, no network or Docker needed.
 
 ---
 
+## Week 6 — Visual AI Decision Workflow (`workflow-ai/`)
+
+A separate Next.js project (published at
+[github.com/omar320250068-prog/workflow-ai](https://github.com/omar320250068-prog/workflow-ai)):
+every node is an AI decision step that returns **YES** or **NO**, edited on a
+**React Flow** canvas and executed by **Inngest**. Each node maps to an Inngest
+step, asks the LLM a yes/no question, and the answer picks the next edge — so
+execution hops through the graph until a terminal node.
+
+- Editor: add decision nodes, wire **YES**/**NO** edges, edit prompts inline.
+- Execution: `Inngest` function with one step per node; a deterministic **mock
+  judge** runs with no API key, an OpenAI judge runs when `WORKFLOW_PROVIDER=
+  openai` + `OPENAI_API_KEY` are set.
+- Polish: live node/edge status on the canvas, execution logs panel, saved
+  workflows, JSON export/import, execution history, and retry of failed runs.
+
+```bash
+cd workflow-ai
+npm install
+npm run dev                  # http://localhost:3000
+npx inngest-cli dev -u http://localhost:3000/api/inngest --port 8288
+```
+
+See the [workflow-ai repository's README](https://github.com/omar320250068-prog/workflow-ai)
+for the full guide.
+
+---
+
 *Everything below documents the earlier weeks. It is kept intact.*
 
 ---
