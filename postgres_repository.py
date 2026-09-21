@@ -119,3 +119,25 @@ class PostgresTaskRepository(TaskRepository):
                 # Delete the task row that matches the requested primary key.
                 cursor.execute("DELETE FROM tasks WHERE id = %s", (task_id,))
                 return cursor.rowcount > 0
+
+    def aggregate_tasks(self) -> dict:
+        """One SQL pass over the tasks table: count and completion stats."""
+        with self.get_db_connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT
+                        COUNT(*) AS total,
+                        COUNT(*) FILTER (WHERE done) AS done,
+                        COUNT(*) FILTER (WHERE NOT done) AS open,
+                        COALESCE(AVG(CASE WHEN done THEN 100.0 ELSE 0 END), 0) AS completion_rate
+                    FROM tasks
+                    """
+                )
+                row = cursor.fetchone()
+        return {
+            "total": int(row["total"]),
+            "done": int(row["done"]),
+            "open": int(row["open"]),
+            "completion_rate": round(float(row["completion_rate"]), 1),
+        }

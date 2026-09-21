@@ -25,3 +25,8 @@ class TaskRepository(ABC):
     @abstractmethod
     def delete_task(self, task_id: int) -> bool:
         raise NotImplementedError
+
+    @abstractmethod
+    def aggregate_tasks(self) -> dict:
+        """Aggregate task rows for the report: total / done / open / completion rate."""
+        raise NotImplementedError

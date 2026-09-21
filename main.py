@@ -1,11 +1,13 @@
+from pathlib import Path
 from typing import Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse, Response
-from pydantic import BaseModel
+from fastapi.responses import FileResponse, JSONResponse, Response
+from pydantic import BaseModel, Field
 
 from auth import check_supabase_connection, get_current_user, logout_user, supabase
+from jobs import PostgresJobRepository, SqliteJobRepository
 from llm import (
     InvalidModelOutputError,
     LLMClient,
@@ -15,10 +17,38 @@ from llm import (
     ReceiptRequest,
 )
 from postgres_repository import PostgresTaskRepository
+from report_worker import JobWorker, ScheduleRunner, make_report_handlers
+from reports import REPORT_KIND
+from sqlite_repository import SQLiteTaskRepository
 from supabase_auth.errors import AuthApiError
 
 app = FastAPI(title="Task & Auth API", version="2.0")
 repo = PostgresTaskRepository()
+
+BASE_DIR = Path(__file__).resolve().parent
+ARTIFACTS_DIR = BASE_DIR / "artifacts"
+JOBS_DB = BASE_DIR / "jobs.db"
+BOOKS_JSON = BASE_DIR / "books.json"
+
+report_worker: JobWorker | None = None
+schedule_runner: ScheduleRunner | None = None
+
+
+def build_job_repository():
+    """Jobs live in PostgreSQL in production, SQLite (jobs.db) otherwise."""
+    try:
+        store = PostgresJobRepository()
+        store.init_db()
+        print("Report job store: PostgreSQL")
+        return store
+    except Exception as exc:  # noqa: BLE001
+        print(f"WARNING: PostgreSQL job store unavailable ({exc}); using SQLite jobs.db")
+        store = SqliteJobRepository(JOBS_DB)
+        store.init_db()
+        return store
+
+
+job_repo = build_job_repository()
 
 class TaskIn(BaseModel):
     title: str
@@ -31,17 +61,38 @@ class AuthCredentials(BaseModel):
     email: str
     password: str
 
+class ReportScheduleIn(BaseModel):
+    name: str
+    interval_minutes: int = Field(60, ge=1, le=1440)
+
 
 @app.on_event("startup")
 def startup_event() -> None:
+    global repo, report_worker, schedule_runner
     try:
         repo.init_db()
     except Exception as exc:  # noqa: BLE001
-        print(f"WARNING: Task database unavailable: {exc}")
+        print(f"WARNING: PostgreSQL task DB unavailable ({exc}); falling back to SQLite tasks.db")
+        repo = SQLiteTaskRepository()
+        repo.init_db()
     ok, message = check_supabase_connection()
     print(message)
     if not ok:
         print("WARNING: " + message)
+
+    report_worker = JobWorker(job_repo, make_report_handlers(repo, ARTIFACTS_DIR, BOOKS_JSON))
+    schedule_runner = ScheduleRunner(job_repo, REPORT_KIND, poll_interval=5.0)
+    report_worker.start()
+    schedule_runner.start()
+    print("Report worker + scheduler started")
+
+
+@app.on_event("shutdown")
+def shutdown_event() -> None:
+    if report_worker is not None:
+        report_worker.stop()
+    if schedule_runner is not None:
+        schedule_runner.stop()
 
 
 @app.exception_handler(RequestValidationError)
@@ -69,6 +120,10 @@ def root():
             "/protected/profile",
             "/protected/dashboard",
             "/ai/parse-receipt",
+            "/reports",
+            "/reports/{job_id}",
+            "/reports/{job_id}/download",
+            "/reports/schedules",
         ],
     }
 
@@ -233,3 +288,92 @@ def delete_task(task_id: int):
     deleted = repo.delete_task(task_id)
     if not deleted:
         raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+
+
+# ---------------------------------------------------------------------------
+# Reports: background job -> PDF artifact (query, render, store and link)
+# ---------------------------------------------------------------------------
+
+def artifact_view(job: dict) -> dict:
+    """Attach the artifact link to a finished job (store-and-link, no bytes)."""
+    view = dict(job)
+    if job["status"] == "done" and job.get("artifact_name"):
+        view["artifact"] = {
+            "name": job["artifact_name"],
+            "bytes": job["artifact_bytes"],
+            "content_type": "application/pdf",
+            "url": f"/reports/{job['job_id']}/download",
+        }
+    else:
+        view["artifact"] = None
+    return view
+
+
+@app.post("/reports", status_code=202, summary="Generate a task report in the background")
+def create_report():
+    """Enqueue a report job. Returns a job id + status URL immediately."""
+    job = job_repo.create_job(REPORT_KIND)
+    return {
+        "job_id": job["job_id"],
+        "status": job["status"],
+        "status_url": f"/reports/{job['job_id']}",
+    }
+
+
+@app.get("/reports", summary="List report jobs")
+def list_reports():
+    """Recent report job summaries, newest first."""
+    return {"reports": [artifact_view(job) for job in job_repo.list_jobs(limit=50)]}
+
+
+@app.post("/reports/schedules", status_code=201, summary="Schedule a recurring report")
+def create_schedule(payload: ReportScheduleIn):
+    """Create a schedule that enqueues a report job every `interval_minutes`."""
+    name = payload.name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Schedule name must be a non-empty string")
+    schedule = job_repo.create_schedule(name, payload.interval_minutes)
+    return {"schedule": schedule}
+
+
+@app.get("/reports/schedules", summary="List report schedules")
+def list_schedules():
+    """All recurring report schedules."""
+    return {"schedules": job_repo.list_schedules()}
+
+
+@app.delete("/reports/schedules/{schedule_id}", status_code=204, summary="Delete a schedule")
+def delete_schedule(schedule_id: str):
+    """Remove a recurring report schedule."""
+    deleted = job_repo.delete_schedule(schedule_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Schedule not found")
+
+
+@app.get("/reports/{job_id}", summary="Get report job status")
+def get_report(job_id: str):
+    """Poll a report job. A done job carries a link to its PDF artifact."""
+    job = job_repo.get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Report job not found")
+    return {"report": artifact_view(job)}
+
+
+@app.get("/reports/{job_id}/download", summary="Download the generated PDF artifact")
+def download_report(job_id: str):
+    """Serve the stored PDF from disk. Never passed through job memory."""
+    job = job_repo.get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Report job not found")
+    if job["status"] in ("pending", "running"):
+        raise HTTPException(status_code=409, detail="Report is still being generated")
+    if not job.get("artifact_name") or not job.get("artifact_bytes"):
+        raise HTTPException(status_code=404, detail="Report produced no artifact")
+    artifact_path = ARTIFACTS_DIR / Path(job["artifact_name"]).name
+    if not artifact_path.is_file():
+        raise HTTPException(status_code=410, detail="Artifact file is missing from disk")
+    return FileResponse(
+        artifact_path,
+        media_type="application/pdf",
+        filename=job["artifact_name"],
+    )

@@ -349,6 +349,110 @@ Staged as `Week 5: ...` commits and pushed (see `git log --oneline`).
 
 ---
 
+## Week 6 — Report Pipeline: Query → Render → Background Job → Link
+
+The API now produces a **PDF task report** in the background. Querying the task
+data, rendering a PDF, and doing the work off the request path — then returning
+a **link** to the finished artifact instead of pushing megabytes of bytes
+around.
+
+### The pipeline
+
+```
+POST /reports            → returns immediately with a job_id (202)
+POLL  /reports/{job_id}  → pending → running → done (+ artifact link)
+GET   /reports/{job_id}/download → streams the PDF from disk
+```
+
+Three layers, each with one job:
+
+1. **Query** — `aggregate_tasks()` (`repository.py`) runs real SQL over the
+   tasks table: `COUNT(*)`, `SUM(done)`, `AVG(done)` → total / done / open /
+   completion rate. Both SQLite and Postgres implement it.
+2. **Render** — `reports.py` builds an A4 PDF with ReportLab: a headline, a
+   status-kpi table, the top task rows (max 200), and a small "book collection"
+   section (`books.json` from Week 4) with count, average price, most expensive
+   and best rated.
+3. **Background job** — `jobs.py` is a job store (queue tables `report_jobs` +
+   `report_schedules`) mirrored after the repository pattern: PostgreSQL in
+   production, `jobs.db` (SQLite) as fallback when Docker is off. `report_worker.py`
+   runs two daemon threads in-process:
+   - **`JobWorker`** claims a `pending` job → `running` → renders → `done`/`failed`.
+   - **`ScheduleRunner`** wakes "due" schedules and enqueues a fresh job.
+
+**Store-and-link:** a done job holds the artifact's *name* + *byte size* in the
+`report_jobs` row; the bytes live in `artifacts/` on disk. The download endpoint
+serves the file (`FileResponse`) — the API never passes PDF bytes through memory
+or JSON, so a big report can't blow up the response.
+
+### Startup resilience
+
+At import time the app builds the job store (tries Postgres, falls back to
+`jobs.db`). At startup it tries the task DB (falls back to `tasks.db`), and in
+both cases prints a WARNING with the reason. The full stack still works with
+Docker **or** plain SQLite — so `uvicorn main:app` runs everywhere.
+
+### Endpoints
+
+| Method | Endpoint | Returns | Meaning |
+| --- | --- | --- | --- |
+| POST | `/reports` | `202` | enqueue a report job → `job_id` + `status_url` |
+| GET | `/reports` | `200` | recent job summaries (newest first) |
+| GET | `/reports/{job_id}` | `200` | poll; `done` jobs carry an `artifact` link |
+| GET | `/reports/{job_id}/download` | `200` PDF | `409` while running, `404` if no artifact, `410` if file gone |
+| POST | `/reports/schedules` | `201` | `name` + `interval_minutes` (1–1440) recurring report |
+| GET | `/reports/schedules` | `200` | list schedules |
+| DELETE | `/reports/schedules/{schedule_id}` | `204` | stop a schedule |
+
+### Files
+
+```
+jobs.py                    # JobRepository (ABC) + SQLite + Postgres impls, tables,
+                           # iso_now()/add_minutes() timestamp helpers
+reports.py                 # aggregate_books(), build_task_report_pdf(), run_task_report_job()
+report_worker.py           # JobWorker + ScheduleRunner + make_report_handlers()
+main.py                    # startup fallback, worker start/stop, report routes
+test_report_pipeline.py    # 11 offline tests (no network, no Docker)
+artifacts/                 # generated PDFs (gitignored)
+jobs.db                    # SQLite fallback job store (gitignored)
+```
+
+### Try it
+
+```bash
+pip install -r requirements.txt        # adds reportlab
+uvicorn main:app
+
+# 1. enqueue a report (jobs instantly when Postgres is off -> SQLite fallback)
+curl -X POST localhost:8000/reports
+# => {"job_id":"...","status":"pending","status_url":"/reports/..."}
+
+# 2. poll until done
+curl localhost:8000/reports/<job_id>
+# => {"report":{...,"status":"done","artifact":{"url":"/reports/<id>/download",...}}}
+
+# 3. download the PDF
+curl -OJ localhost:8000/reports/<job_id>/download
+
+# 4. recurring report every hour
+curl -X POST localhost:8000/reports/schedules \
+  -H "Content-Type: application/json" \
+  -d '{"name":"Hourly snapshot","interval_minutes":60}'
+```
+
+### Tests
+
+```
+python test_report_pipeline.py
+```
+
+`11 report pipeline tests passed` — job lifecycle (pending → done with a real
+`%PDF-` artifact, failing jobs record the error), SQLite aggregation, the
+schedule runner turning a due schedule into a job, and direct PDF rendering.
+All offline, no network or Docker needed.
+
+---
+
 *Everything below documents the earlier weeks. It is kept intact.*
 
 ---

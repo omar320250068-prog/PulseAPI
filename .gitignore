@@ -4,3 +4,6 @@ __pycache__/
 tasks.db
 .env
 .env.docker
+# report jobs (Week 6)
+jobs.db
+artifacts/
