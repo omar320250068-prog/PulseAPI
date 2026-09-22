@@ -1,0 +1,22 @@
+BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//Omar Hindawy//Next Case Study Reminder//EN
+CALSCALE:GREGORIAN
+METHOD:PUBLISH
+BEGIN:VEVENT
+UID:pulseapi-week8-email-report-reminder@omarhindawy
+DTSTAMP:20260922T120000Z
+DTSTART:20260927T100000
+DURATION:PT30M
+RRULE:FREQ=WEEKLY;BYDAY=SU
+SUMMARY:PulseAPI Week 8 - scheduled email report (write the case study)
+DESCRIPTION:Three beats: Problem | What I did | What came of it.\nLog it in C:\\assignment2\\How-to-Add-the-Next-Case.md\nthen commit + push to https://github.com/omar320250068-prog/PulseAPI
+STATUS:CONFIRMED
+TRANSP:OPAQUE
+BEGIN:VALARM
+ACTION:DISPLAY
+DESCRIPTION:Time to work on or record the next case study
+TRIGGER:-PT12H
+END:VALARM
+END:VEVENT
+END:VCALENDAR
