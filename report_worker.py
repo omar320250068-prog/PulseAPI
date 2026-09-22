@@ -1,20 +1,39 @@
-"""Background job execution for the report pipeline.
+"""Background job execution (A6/A7 job pattern).
 
-Two daemon threads run inside the FastAPI process (fine for a single worker
-process; scale out to a real queue in production):
-
-    JobWorker       - picks a pending `report_jobs` row off the queue and runs
-                      its registered handler, then marks the job done/failed.
+    JobWorker       - claims a pending `report_jobs` row, runs its registered
+                      handler, and records the outcome. Handlers that raise
+                      RetryableJobError are retried with exponential backoff
+                      (see jobs.handle_failure); everything else is a permanent
+                      failure. Every failure or retry writes a `job_alerts` row
+                      and is reported to the console and, if configured, the
+                      ALERT_WEBHOOK_URL endpoint.
     ScheduleRunner  - wakes due `report_schedules` and enqueues a fresh job,
                       then moves `next_run_at` forward by the interval.
 """
 
 from __future__ import annotations
 
+import os
 import threading
 
+import httpx
+
 from jobs import add_minutes, iso_now
+from llm import (
+    InvalidModelOutputError,
+    LLMClient,
+    LLMUnavailableError,
+    Receipt,
+)
 from reports import REPORT_KIND, run_task_report_job
+
+
+class RetryableJobError(Exception):
+    """Raised by a handler to tell the worker to retry this job (transient)."""
+
+
+class JobExecutionError(Exception):
+    """Raised by a handler to tell the worker the job can never succeed."""
 
 
 def make_report_handlers(repo, artifact_dir, books_path=None) -> dict:
@@ -24,6 +43,44 @@ def make_report_handlers(repo, artifact_dir, books_path=None) -> dict:
         return run_task_report_job(repo, artifact_dir, books_path, job["job_id"])
 
     return {REPORT_KIND: run_task_report}
+
+
+def make_receipt_handlers(client: LLMClient | None = None) -> dict:
+    """Handle `receipt_parse` jobs: run the A5 AI call in the background.
+
+    The slow LLM judgement moves off the HTTP request and onto a worker. The
+    parsed, schema-validated Receipt is stored as the job's small JSON result.
+    """
+    if client is None:
+        client = LLMClient()
+
+    def parse_receipt(job: dict) -> dict:
+        text = (job["payload"] or {}).get("text", "").strip()
+        if not text:
+            raise JobExecutionError("no text to parse in job payload")
+        try:
+            receipt = client.judge_text(text, Receipt)
+        except (LLMUnavailableError, InvalidModelOutputError) as exc:
+            raise RetryableJobError(f"{type(exc).__name__}: {exc}") from exc
+        return receipt.model_dump()
+
+    return {"receipt_parse": parse_receipt}
+
+
+def notify_alert(alert: dict, event: str) -> None:
+    """Best-effort alert delivery: console always, webhook if configured."""
+    print(f"[alert:{event}] {alert['level']} {alert['message']}")
+    webhook = os.getenv("ALERT_WEBHOOK_URL", "").strip()
+    if not webhook:
+        return
+    try:
+        httpx.post(
+            webhook,
+            json={"event": event, "alert": alert},
+            timeout=2.0,
+        )
+    except Exception:  # noqa: BLE001
+        print(f"[alert] webhook delivery to {webhook} failed (best-effort, ignored)")
 
 
 class JobWorker(threading.Thread):
@@ -53,17 +110,46 @@ class JobWorker(threading.Thread):
                 self._stop.wait(self.poll_interval)
 
     def _process(self, job: dict) -> None:
+        if job.get("status") in ("done", "failed"):
+            return  # terminal jobs are never re-run
         self.store.mark_running(job["job_id"])
+        error = None
+        data = None
         try:
             handler = self.handlers.get(job["kind"])
             if handler is None:
-                raise ValueError(f"no handler registered for job kind {job['kind']!r}")
-            artifact = handler(job)
-            self.store.mark_done(
-                job["job_id"], artifact["artifact_name"], artifact["artifact_bytes"]
-            )
+                raise JobExecutionError(f"no handler registered for job kind {job['kind']!r}")
+            data = handler(job)
+        except RetryableJobError as exc:
+            self._finish_failure(job, f"{type(exc).__name__}: {exc}"[:500], retryable=True)
+            return
         except Exception as exc:  # noqa: BLE001
-            self.store.mark_failed(job["job_id"], f"{type(exc).__name__}: {exc}"[:500])
+            self._finish_failure(job, f"{type(exc).__name__}: {exc}"[:500], retryable=False)
+            return
+
+        if isinstance(data, dict) and "artifact_name" in data and "artifact_bytes" in data:
+            self.store.mark_done(
+                job["job_id"],
+                data["artifact_name"],
+                data["artifact_bytes"],
+                attempts=job["attempts"] + 1,
+            )
+            print(f"[worker] job {job['job_id']} done -> artifact {data['artifact_name']}")
+        else:
+            self.store.mark_done(
+                job["job_id"], result=data or {"ok": True}, attempts=job["attempts"] + 1
+            )
+            print(f"[worker] job {job['job_id']} done -> result")
+
+    def _finish_failure(self, job: dict, error: str, retryable: bool) -> None:
+        outcome = self.store.handle_failure(
+            job["job_id"],
+            job["attempts"],
+            error,
+            retryable,
+            job["max_attempts"],
+        )
+        notify_alert(outcome["alert"], event="retry" if outcome["retried"] else "job-failed")
 
 
 class ScheduleRunner(threading.Thread):

@@ -4,7 +4,7 @@ from typing import Optional
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from auth import check_supabase_connection, get_current_user, logout_user, supabase
 from jobs import PostgresJobRepository, SqliteJobRepository
@@ -17,7 +17,12 @@ from llm import (
     ReceiptRequest,
 )
 from postgres_repository import PostgresTaskRepository
-from report_worker import JobWorker, ScheduleRunner, make_report_handlers
+from report_worker import (
+    JobWorker,
+    ScheduleRunner,
+    make_receipt_handlers,
+    make_report_handlers,
+)
 from reports import REPORT_KIND
 from sqlite_repository import SQLiteTaskRepository
 from supabase_auth.errors import AuthApiError
@@ -29,6 +34,8 @@ BASE_DIR = Path(__file__).resolve().parent
 ARTIFACTS_DIR = BASE_DIR / "artifacts"
 JOBS_DB = BASE_DIR / "jobs.db"
 BOOKS_JSON = BASE_DIR / "books.json"
+
+RECEIPT_JOB_KIND = "receipt_parse"
 
 report_worker: JobWorker | None = None
 schedule_runner: ScheduleRunner | None = None
@@ -66,6 +73,23 @@ class ReportScheduleIn(BaseModel):
     interval_minutes: int = Field(60, ge=1, le=1440)
 
 
+class AIJobRequest(BaseModel):
+    text: str
+    client_request_id: str | None = None
+
+    @field_validator("text")
+    @classmethod
+    def _non_empty(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("text must not be empty")
+        return stripped
+
+
+class AlertsAckIn(BaseModel):
+    alert_ids: list[str]
+
+
 @app.on_event("startup")
 def startup_event() -> None:
     global repo, report_worker, schedule_runner
@@ -80,7 +104,10 @@ def startup_event() -> None:
     if not ok:
         print("WARNING: " + message)
 
-    report_worker = JobWorker(job_repo, make_report_handlers(repo, ARTIFACTS_DIR, BOOKS_JSON))
+    report_worker = JobWorker(
+        job_repo,
+        {**make_report_handlers(repo, ARTIFACTS_DIR, BOOKS_JSON), **make_receipt_handlers()},
+    )
     schedule_runner = ScheduleRunner(job_repo, REPORT_KIND, poll_interval=5.0)
     report_worker.start()
     schedule_runner.start()
@@ -96,8 +123,10 @@ def shutdown_event() -> None:
 
 
 @app.exception_handler(RequestValidationError)
-async def validation_error_handler(_: Request, exc: RequestValidationError):
-    return JSONResponse(status_code=400, content={"error": "Invalid request body"})
+async def validation_error_handler(request: Request, exc: RequestValidationError):
+    if request.url.path == "/ai/parse-receipt":
+        return JSONResponse(status_code=400, content={"error": "Invalid request body"})
+    return JSONResponse(status_code=422, content={"error": "Invalid request body"})
 
 
 @app.exception_handler(HTTPException)
@@ -120,6 +149,10 @@ def root():
             "/protected/profile",
             "/protected/dashboard",
             "/ai/parse-receipt",
+            "/ai/jobs",
+            "/ai/jobs/{job_id}",
+            "/alerts",
+            "/alerts/ack",
             "/reports",
             "/reports/{job_id}",
             "/reports/{job_id}/download",
@@ -377,3 +410,62 @@ def download_report(job_id: str):
         media_type="application/pdf",
         filename=job["artifact_name"],
     )
+
+
+# ---------------------------------------------------------------------------
+# Background AI jobs: the slow LLM call answers with 202, a worker does the
+# work, and a status endpoint reports the result (idempotent by
+# client_request_id, bounded retries, alerts when a job really fails).
+# ---------------------------------------------------------------------------
+
+@app.post("/ai/jobs", status_code=202, summary="Enqueue a background AI receipt parse")
+def create_ai_job(payload: AIJobRequest):
+    """Accept fast (202), run the LLM in the background.
+
+    Send the same `client_request_id` again and no second job is created -
+    the existing one is returned (idempotency).
+    """
+    idem_key = payload.client_request_id or None
+    replay = None
+    if idem_key:
+        replay = job_repo.find_by_idempotency_key(RECEIPT_JOB_KIND, idem_key)
+    job = job_repo.create_job(
+        RECEIPT_JOB_KIND,
+        {"text": payload.text},
+        max_attempts=3,
+        idempotency_key=idem_key,
+    )
+    return {
+        "job_id": job["job_id"],
+        "status": job["status"],
+        "status_url": f"/ai/jobs/{job['job_id']}",
+        "idempotent_replay": replay is not None,
+    }
+
+
+@app.get("/ai/jobs/{job_id}", summary="Get a background AI job's status and result")
+def get_ai_job(job_id: str):
+    """Poll an AI job. A done job carries its parsed receipt in `result`."""
+    job = job_repo.get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="AI job not found")
+    return {"job": job}
+
+
+@app.get("/ai/jobs", summary="List background AI jobs")
+def list_ai_jobs():
+    """Recent AI job summaries, newest first."""
+    return {"jobs": job_repo.list_jobs(limit=50)}
+
+
+@app.get("/alerts", summary="List job alerts (the 'someone must find out' feed)")
+def list_alerts():
+    """Alerts raised by failed/retried jobs. `open` counts un-"acked" ones."""
+    alerts = job_repo.list_alerts(limit=50)
+    return {"alerts": alerts, "open": sum(1 for alert in alerts if not alert["acked"])}
+
+
+@app.post("/alerts/ack", summary="Acknowledge alert(s)")
+def ack_alerts(payload: AlertsAckIn):
+    """Mark alerts as handled so the feed's `open` count drops."""
+    return {"acked": job_repo.ack_alerts(payload.alert_ids)}

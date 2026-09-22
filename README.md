@@ -481,6 +481,86 @@ for the full guide.
 
 ---
 
+## Week 7 — Background AI Jobs: Retry · Idempotency · Alerts
+
+The slow LLM judgement from Week 5 moves off the request path and becomes a
+**background job** with production-grade guardrails: the same request never
+runs twice, flaky providers are retried with exponential backoff, and when a
+job really fails *someone finds out* — via an alert feed in the API and an
+optional webhook.
+
+### The pattern
+
+```
+POST /ai/jobs{?client_request_id}  → 202 immediately, a worker does the LLM call
+POLL /ai/jobs/{job_id}            → pending → running → done (with `result`)
+GET  /alerts                      → the "someone must find out" feed
+POST /alerts/ack                  → mark alerts handled
+```
+
+Three non-negotiables, proven offline in `test_background_jobs.py`:
+
+1. **Idempotency** — send the same `client_request_id` again and no second job
+   is created; the existing one is returned with `idempotent_replay: true`. A
+   unique index on `(kind, idempotency_key)` enforces this at the database
+   level, and `create_job()` returns the existing job on a race-condition
+   `IntegrityError`/`UniqueViolation`.
+2. **Bounded retries with backoff** — handlers raise `RetryableJobError` for
+   transient problems (e.g. `LLMUnavailableError`, `InvalidModelOutputError`);
+   `jobs.handle_failure()` records the attempt and schedules a re-run after
+   `next_retry_at` (`2s → 4s → 8s …`, capped at 30s). Non-retryable errors
+   (like a missing API key — `LLMNotConfiguredError`) fail immediately: a retry
+   would be wasted. A job is re-claimable only after its `next_retry_at`.
+3. **Alerts** — every retry writes a `warning` alert and every permanent
+   failure a `critical` alert into the `job_alerts` table. Alerts are listed,
+   acked individually, and `POST /ai/jobs` / `/alerts` expose the feed. The
+   worker also posts best-effort to an optional `ALERT_WEBHOOK_URL` (see
+   `.env.example`) so a Slack-style channel can pick failures up.
+
+Other behaviour baked into the same worker:
+
+- Success records the **attempt count** (`attempts` = total tries including the
+  successful one), stores the small parsed result in the job row, and clears
+  `next_retry_at`.
+- Unknown job kinds fail with a recorded `critical` alert instead of hanging.
+- Terminal jobs (`done`/`failed`) are never re-run.
+
+### Files
+
+```
+jobs.py                 # + result, attempts, max_attempts, next_retry_at, idempotency_key
+                        # + job_alerts table, all methods implemented for SQLite AND Postgres
+report_worker.py        # RetryableJobError / JobExecutionError, make_receipt_handlers(),
+                        # notify_alert(), failure-aware JobWorker._process()
+main.py                 # + /ai/jobs, /ai/jobs/{job_id}, /alerts, /alerts/ack
+test_background_jobs.py # 10 offline tests (no network, no Docker)
+```
+
+### Endpoints
+
+| Method | Endpoint | Returns | Meaning |
+| --- | --- | --- | --- |
+| POST | `/ai/jobs` | `202` | enqueue an AI receipt-parse job; `client_request_id` makes it idempotent |
+| GET | `/ai/jobs/{job_id}` | `200` | poll; a `done` job carries its parsed receipt in `result` |
+| GET | `/ai/jobs` | `200` | recent AI job summaries |
+| GET | `/alerts` | `200` | alert feed + `open` count of un-acked alerts |
+| POST | `/alerts/ack` | `200` | acknowledge alerts (`{"alert_ids": [...]}`) |
+
+### Tests
+
+```
+python test_background_jobs.py
+```
+
+`10 background-job tests passed` — idempotent dedupe, retry gated by
+`next_retry_at`, a flaky handler retried then succeeding (with the exact
+attempt count), permanent failure after `max_attempts` (with a `critical`
+alert), non-retryable failures failing on attempt 1, alert acking, result
+storage, and an offline end-to-end run of the real app (202 → poll → alert →
+ack) with a deterministic AI stub.
+
+---
+
 *Everything below documents the earlier weeks. It is kept intact.*
 
 ---
